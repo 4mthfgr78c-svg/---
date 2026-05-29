@@ -5,9 +5,9 @@ class CreateObject(StatesGroup):
     waiting_for_address = State()
 
 class AssignShift(StatesGroup):
-    waiting_for_worker = State()      # tg_id уборщицы
+    waiting_for_worker = State()      # выбираем из списка, не ввод ID
     waiting_for_object = State()
-    waiting_for_start = State()       # формат YYYY-MM-DD HH:MM
+    waiting_for_start = State()
     waiting_for_end = State()
 
 class SupplyOrder(StatesGroup):
