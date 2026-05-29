@@ -1,10 +1,11 @@
 import re
 from datetime import datetime
 from aiogram import Router, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
-from config import BOT_TOKEN, MANAGER_IDS
+
+from config import MANAGER_IDS
 from database import *
 from keyboards import *
 from states import *
@@ -52,7 +53,88 @@ async def create_object_address(message: Message, state: FSMContext):
     await message.answer(f"✅ Объект «{name}» добавлен.", reply_markup=main_manager_keyboard())
     await state.clear()
 
-# ---------- МЕНЕДЖЕР: НАЗНАЧЕНИЕ СМЕНЫ (выбор уборщицы из списка) ----------
+# ---------- МЕНЕДЖЕР: УПРАВЛЕНИЕ ОБЪЕКТАМИ (РЕДАКТИРОВАТЬ/УДАЛИТЬ) ----------
+@router.message(F.text == "✏️ Управление объектами")
+async def manage_objects(message: Message):
+    if not is_manager(message.from_user.id):
+        return
+    objects = get_objects()
+    if not objects:
+        await message.answer("Нет ни одного объекта. Сначала создайте объект.")
+        return
+    await message.answer("Выберите объект для редактирования или удаления:", reply_markup=manage_objects_inline(objects))
+
+# Редактирование: начало
+@router.callback_query(F.data.startswith("edit_obj_"))
+async def edit_object_start(call: CallbackQuery, state: FSMContext):
+    obj_id = int(call.data.split("_")[2])
+    obj = get_object_by_id(obj_id)
+    if not obj:
+        await call.message.edit_text("Объект не найден.")
+        await call.answer()
+        return
+    await state.update_data(edit_obj_id=obj_id)
+    await call.message.edit_text(f"Редактируем объект «{obj[1]}».\nВведите новое название (или отправьте «пропустить», чтобы оставить как есть):")
+    await state.set_state(EditObject.waiting_for_new_name)
+    await call.answer()
+
+@router.message(EditObject.waiting_for_new_name)
+async def edit_object_new_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    obj_id = data["edit_obj_id"]
+    obj = get_object_by_id(obj_id)
+    if not obj:
+        await message.answer("Ошибка: объект не найден.")
+        await state.clear()
+        return
+    new_name = message.text if message.text.lower() != "пропустить" else obj[1]
+    await state.update_data(new_name=new_name)
+    await message.answer(f"Новое название: {new_name}\nТеперь введите новый адрес (или «пропустить»):")
+    await state.set_state(EditObject.waiting_for_new_address)
+
+@router.message(EditObject.waiting_for_new_address)
+async def edit_object_new_address(message: Message, state: FSMContext):
+    data = await state.get_data()
+    obj_id = data["edit_obj_id"]
+    obj = get_object_by_id(obj_id)
+    if not obj:
+        await message.answer("Ошибка: объект не найден.")
+        await state.clear()
+        return
+    new_address = message.text if message.text.lower() != "пропустить" else obj[2]
+    new_name = data["new_name"]
+    update_object(obj_id, new_name, new_address)
+    await message.answer(f"✅ Объект обновлён:\nНазвание: {new_name}\nАдрес: {new_address}", reply_markup=main_manager_keyboard())
+    await state.clear()
+
+# Удаление: запрос подтверждения
+@router.callback_query(F.data.startswith("delete_obj_"))
+async def delete_object_confirm(call: CallbackQuery):
+    obj_id = int(call.data.split("_")[2])
+    obj = get_object_by_id(obj_id)
+    if not obj:
+        await call.message.edit_text("Объект не найден.")
+        await call.answer()
+        return
+    await call.message.edit_text(
+        f"⚠️ Вы уверены, что хотите удалить объект «{obj[1]}»?\nВсе связанные смены также будут удалены.",
+        reply_markup=confirm_delete_inline(obj_id, obj[1])
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("confirm_del_"))
+async def delete_object_final(call: CallbackQuery):
+    obj_id = int(call.data.split("_")[2])
+    delete_object(obj_id)
+    await call.message.edit_text("✅ Объект удалён.")
+    await call.answer()
+
+@router.callback_query(F.data == "cancel_delete")
+async def cancel_delete(call: CallbackQuery):
+    await call.message.edit_text("Удаление отменено.")
+    await call.answer()
+
+# ---------- МЕНЕДЖЕР: НАЗНАЧЕНИЕ СМЕНЫ ----------
 @router.message(F.text == "📅 Назначить смену")
 async def assign_shift_start(message: Message, state: FSMContext):
     if not is_manager(message.from_user.id):
