@@ -3,9 +3,7 @@ from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, FSInputFile
-from aiogram.enums.parse_mode import ParseMode
-
+from aiogram.types import Message, CallbackQuery
 from config import BOT_TOKEN, MANAGER_IDS
 from database import *
 from keyboards import *
@@ -13,7 +11,7 @@ from states import *
 
 router = Router()
 
-# -------------------- Регистрация --------------------
+# ---------- СТАРТ ----------
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     tg_id = message.from_user.id
@@ -23,7 +21,15 @@ async def cmd_start(message: Message):
     else:
         await message.answer("👋 Добро пожаловать, уборщица! Используйте кнопки для работы.", reply_markup=main_worker_keyboard())
 
-# -------------------- Менеджер: создание объекта --------------------
+# ---------- ГЛАВНОЕ МЕНЮ (возврат) ----------
+@router.message(F.text == "🏠 Главное меню")
+async def back_to_menu(message: Message):
+    if is_manager(message.from_user.id):
+        await message.answer("Главное меню менеджера:", reply_markup=main_manager_keyboard())
+    else:
+        await message.answer("Главное меню уборщицы:", reply_markup=main_worker_keyboard())
+
+# ---------- МЕНЕДЖЕР: СОЗДАНИЕ ОБЪЕКТА ----------
 @router.message(F.text == "🏢 Создать объект")
 async def create_object_start(message: Message, state: FSMContext):
     if not is_manager(message.from_user.id):
@@ -46,43 +52,36 @@ async def create_object_address(message: Message, state: FSMContext):
     await message.answer(f"✅ Объект «{name}» добавлен.", reply_markup=main_manager_keyboard())
     await state.clear()
 
-# -------------------- Менеджер: назначение смены --------------------
+# ---------- МЕНЕДЖЕР: НАЗНАЧЕНИЕ СМЕНЫ (выбор уборщицы из списка) ----------
 @router.message(F.text == "📅 Назначить смену")
 async def assign_shift_start(message: Message, state: FSMContext):
     if not is_manager(message.from_user.id):
         return
-    await message.answer("Введите Telegram ID уборщицы (число):")
+    workers = get_workers()
+    if not workers:
+        await message.answer("Нет зарегистрированных уборщиц. Попросите их запустить /start.")
+        return
+    await message.answer("Выберите уборщицу:", reply_markup=workers_inline(workers))
     await state.set_state(AssignShift.waiting_for_worker)
 
-@router.message(AssignShift.waiting_for_worker)
-async def assign_shift_worker(message: Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Ошибка: ID должен быть числом. Попробуйте снова.")
-        return
-    worker_id = int(message.text)
-    # проверим, существует ли пользователь
-    with get_connection() as conn:
-        row = conn.execute("SELECT tg_id FROM users WHERE tg_id = ?", (worker_id,)).fetchone()
-        if not row:
-            await message.answer("Пользователь с таким ID не найден. Сначала уборщица должна запустить /start.")
-            return
+@router.callback_query(AssignShift.waiting_for_worker, F.data.startswith("worker_"))
+async def assign_shift_worker(call: CallbackQuery, state: FSMContext):
+    worker_id = int(call.data.split("_")[1])
     await state.update_data(worker_id=worker_id)
     objects = get_objects()
     if not objects:
-        await message.answer("Сначала создайте хотя бы один объект командой «Создать объект».")
+        await call.message.edit_text("Сначала создайте хотя бы один объект командой «Создать объект».")
         await state.clear()
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=name, callback_data=f"obj_{obj_id}")] for obj_id, name, _ in objects
-    ])
-    await message.answer("Выберите объект:", reply_markup=kb)
+    await call.message.edit_text("Выберите объект:", reply_markup=objects_inline(objects))
     await state.set_state(AssignShift.waiting_for_object)
+    await call.answer()
 
 @router.callback_query(AssignShift.waiting_for_object, F.data.startswith("obj_"))
 async def assign_shift_object(call: CallbackQuery, state: FSMContext):
     object_id = int(call.data.split("_")[1])
     await state.update_data(object_id=object_id)
-    await call.message.edit_text("Введите дату и время начала смены в формате: ГГГГ-ММ-ДД ЧЧ:ММ (например, 2025-06-01 10:00)")
+    await call.message.edit_text("Введите дату и время начала смены в формате: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2025-06-15 10:00")
     await state.set_state(AssignShift.waiting_for_start)
     await call.answer()
 
@@ -112,7 +111,66 @@ async def assign_shift_end_time(message: Message, state: FSMContext):
     await message.answer("✅ Смена назначена.", reply_markup=main_manager_keyboard())
     await state.clear()
 
-# -------------------- Уборщица: мои смены --------------------
+# ---------- МЕНЕДЖЕР: СОСТОЯНИЕ ОБЪЕКТОВ ----------
+@router.message(F.text == "📍 Состояние объектов")
+async def objects_status(message: Message):
+    if not is_manager(message.from_user.id):
+        return
+    objects_data = get_objects_with_last_shift()
+    if not objects_data:
+        await message.answer("Нет ни одного объекта.")
+        return
+    text = "🏢 Состояние объектов:\n\n"
+    for obj in objects_data:
+        obj_id, name, address, last_worker, last_end, last_status = obj
+        text += f"📍 {name}\n   Адрес: {address}\n"
+        if last_worker:
+            status_emoji = "✅" if last_status == "completed" else "🔄" if last_status == "in_progress" else "⏳"
+            last_end_str = last_end.strftime("%d.%m %H:%M") if last_end else "не завершена"
+            text += f"   Последняя смена: {last_worker}\n   {status_emoji} {last_status} {last_end_str}\n"
+        else:
+            text += "   Смен ещё не было.\n"
+        text += "\n"
+    await message.answer(text[:4000])
+
+# ---------- МЕНЕДЖЕР: ЖУРНАЛ СМЕН ----------
+@router.message(F.text == "📊 Журнал смен (все)")
+async def all_shifts_log(message: Message):
+    if not is_manager(message.from_user.id):
+        return
+    rows = get_all_shifts(50)
+    if not rows:
+        await message.answer("Нет ни одной смены.")
+        return
+    text = "📋 Последние 50 смен:\n\n"
+    for r in rows:
+        text += f"{r[1]} — {r[2]}\n  План: {r[3].strftime('%d.%m %H:%M')} - {r[4].strftime('%H:%M')}\n"
+        if r[5]:
+            text += f"  Факт начало: {r[5].strftime('%d.%m %H:%M')}\n"
+        if r[6]:
+            text += f"  Факт конец: {r[6].strftime('%d.%m %H:%M')}\n"
+        text += f"  Статус: {r[7]}\n\n"
+    await message.answer(text[:4000])
+
+# ---------- МЕНЕДЖЕР: ЗАКАЗЫ МОЮЩИХ ----------
+@router.message(F.text == "📦 Заказы моющих")
+async def view_orders(message: Message):
+    if not is_manager(message.from_user.id):
+        return
+    orders = get_new_orders()
+    if not orders:
+        await message.answer("Нет новых заказов.")
+        return
+    await message.answer("Новые заказы (нажмите, чтобы отметить как обработанный):", reply_markup=orders_inline(orders))
+
+@router.callback_query(F.data.startswith("process_order_"))
+async def process_order_callback(call: CallbackQuery):
+    order_id = int(call.data.split("_")[2])
+    mark_order_processed(order_id, call.from_user.id)
+    await call.message.edit_text(f"✅ Заказ №{order_id} отмечен как обработанный.")
+    await call.answer()
+
+# ---------- УБОРЩИЦА: МОИ СМЕНЫ ----------
 @router.message(F.text == "📋 Мои смены")
 async def my_shifts(message: Message):
     tg_id = message.from_user.id
@@ -130,11 +188,9 @@ async def my_shifts(message: Message):
         text += "\n"
     await message.answer(text, reply_markup=shifts_inline(shifts))
 
-# Уборщица начинает смену по инлайн-кнопке
 @router.callback_query(F.data.startswith("start_shift_"))
 async def start_shift_callback(call: CallbackQuery):
     shift_id = int(call.data.split("_")[2])
-    # проверим, что смена принадлежит этому пользователю
     with get_connection() as conn:
         row = conn.execute("SELECT worker_tg_id, status FROM shifts WHERE id = ?", (shift_id,)).fetchone()
         if not row or row[0] != call.from_user.id:
@@ -147,7 +203,7 @@ async def start_shift_callback(call: CallbackQuery):
     await call.message.edit_text("🚀 Смена начата! Когда закончите, нажмите «Завершить текущую смену» в меню.")
     await call.answer()
 
-# Завершить текущую смену (с возможностью фото)
+# ---------- УБОРЩИЦА: ЗАВЕРШИТЬ СМЕНУ ----------
 @router.message(F.text == "✅ Завершить текущую смену")
 async def finish_shift_prompt(message: Message):
     active = get_active_shift(message.from_user.id)
@@ -177,7 +233,7 @@ async def finish_shift_with_photo(message: Message):
     end_shift(shift_id, datetime.now(), photo_file_id)
     await message.answer("✅ Смена завершена, фото сохранено. Спасибо!", reply_markup=main_worker_keyboard())
 
-# -------------------- Заказ моющих средств --------------------
+# ---------- УБОРЩИЦА: ЗАКАЗ МОЮЩИХ ----------
 @router.message(F.text == "🧴 Заказать моющие")
 async def order_supply(message: Message, state: FSMContext):
     await message.answer("Напишите, что нужно заказать (название, количество, примечания):")
@@ -188,54 +244,8 @@ async def order_supply_text(message: Message, state: FSMContext):
     add_supply_order(message.from_user.id, message.text)
     await message.answer("✅ Заказ отправлен менеджеру.", reply_markup=main_worker_keyboard())
     await state.clear()
-    # уведомить всех менеджеров
-    from config import MANAGER_IDS
     for mgr in MANAGER_IDS:
         try:
             await message.bot.send_message(mgr, f"📦 Новый заказ моющих от {message.from_user.full_name}:\n{message.text}")
         except:
             pass
-
-# -------------------- Менеджер: просмотр заказов --------------------
-@router.message(F.text == "📦 Заказы моющих")
-async def view_orders(message: Message):
-    if not is_manager(message.from_user.id):
-        return
-    orders = get_new_orders()
-    if not orders:
-        await message.answer("Нет новых заказов.")
-        return
-    await message.answer("Новые заказы (нажмите, чтобы отметить как обработанный):", reply_markup=orders_inline(orders))
-
-@router.callback_query(F.data.startswith("process_order_"))
-async def process_order_callback(call: CallbackQuery):
-    order_id = int(call.data.split("_")[2])
-    mark_order_processed(order_id, call.from_user.id)
-    await call.message.edit_text(f"✅ Заказ №{order_id} отмечен как обработанный.")
-    await call.answer()
-
-# -------------------- Журнал смен для менеджера --------------------
-@router.message(F.text == "📊 Журнал смен (все)")
-async def all_shifts_log(message: Message):
-    if not is_manager(message.from_user.id):
-        return
-    with get_connection() as conn:
-        rows = conn.execute("""
-            SELECT s.id, u.full_name, o.name, s.start_time, s.end_time, s.actual_start, s.actual_end, s.status
-            FROM shifts s
-            JOIN users u ON s.worker_tg_id = u.tg_id
-            JOIN objects o ON s.object_id = o.id
-            ORDER BY s.start_time DESC LIMIT 50
-        """).fetchall()
-    if not rows:
-        await message.answer("Нет ни одной смены.")
-        return
-    text = "📋 Последние 50 смен:\n\n"
-    for r in rows:
-        text += f"{r[1]} — {r[2]}\n  План: {r[3].strftime('%d.%m %H:%M')} - {r[4].strftime('%H:%M')}\n"
-        if r[5]:
-            text += f"  Факт начало: {r[5].strftime('%d.%m %H:%M')}\n"
-        if r[6]:
-            text += f"  Факт конец: {r[6].strftime('%d.%m %H:%M')}\n"
-        text += f"  Статус: {r[7]}\n\n"
-    await message.answer(text[:4000])  # телеграм лимит
