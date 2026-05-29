@@ -1,6 +1,6 @@
 import sqlite3
-from datetime import datetime
-from config import DB_PATH
+from datetime import datetime, timedelta
+from config import DB_PATH, MANAGER_IDS
 
 def get_connection():
     return sqlite3.connect(DB_PATH)
@@ -47,15 +47,12 @@ def init_db():
                 processed_by INTEGER
             );
         """)
-        # Добавляем менеджеров из config, если их ещё нет
-        from config import MANAGER_IDS
         for tg_id in MANAGER_IDS:
             conn.execute(
                 "INSERT OR IGNORE INTO users (tg_id, role) VALUES (?, ?)",
                 (tg_id, "manager")
             )
 
-# Работа с пользователями
 def register_user(tg_id, username, full_name):
     with get_connection() as conn:
         conn.execute(
@@ -68,7 +65,10 @@ def is_manager(tg_id):
         row = conn.execute("SELECT role FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
         return row and row[0] == "manager"
 
-# Объекты
+def get_workers():
+    with get_connection() as conn:
+        return conn.execute("SELECT tg_id, full_name FROM users WHERE role = 'worker' ORDER BY full_name").fetchall()
+
 def add_object(name, address, created_by):
     with get_connection() as conn:
         cur = conn.execute(
@@ -81,7 +81,27 @@ def get_objects():
     with get_connection() as conn:
         return conn.execute("SELECT id, name, address FROM objects ORDER BY name").fetchall()
 
-# Смены
+def get_objects_with_last_shift():
+    with get_connection() as conn:
+        query = """
+            SELECT 
+                o.id, o.name, o.address,
+                u.full_name as last_worker,
+                s.actual_end as last_end,
+                s.status as last_status
+            FROM objects o
+            LEFT JOIN shifts s ON s.object_id = o.id
+            LEFT JOIN users u ON s.worker_tg_id = u.tg_id
+            WHERE s.id = (
+                SELECT id FROM shifts 
+                WHERE object_id = o.id 
+                ORDER BY actual_end DESC NULLS LAST, start_time DESC 
+                LIMIT 1
+            ) OR s.id IS NULL
+            ORDER BY o.name
+        """
+        return conn.execute(query).fetchall()
+
 def add_shift(worker_tg_id, object_id, start_time, end_time):
     with get_connection() as conn:
         conn.execute(
@@ -124,7 +144,16 @@ def end_shift(shift_id, actual_end, photo_file_id=None):
             (actual_end, photo_file_id, shift_id)
         )
 
-# Заказы моющих
+def get_all_shifts(limit=50):
+    with get_connection() as conn:
+        return conn.execute("""
+            SELECT s.id, u.full_name, o.name, s.start_time, s.end_time, s.actual_start, s.actual_end, s.status
+            FROM shifts s
+            JOIN users u ON s.worker_tg_id = u.tg_id
+            JOIN objects o ON s.object_id = o.id
+            ORDER BY s.start_time DESC LIMIT ?
+        """, (limit,)).fetchall()
+
 def add_supply_order(worker_tg_id, text):
     with get_connection() as conn:
         conn.execute(
@@ -149,13 +178,9 @@ def mark_order_processed(order_id, manager_tg_id):
             (manager_tg_id, order_id)
         )
 
-# Утилиты для напоминаний
 def get_shifts_for_reminder(hours_before):
-    """Возвращает смены, которые начнутся ровно через hours_before часов от текущего момента"""
-    from datetime import datetime, timedelta
     now = datetime.now()
     target_time = now + timedelta(hours=hours_before)
-    # Ищем смены, у которых start_time попадает в интервал [target_time, target_time+1 минута)
     with get_connection() as conn:
         return conn.execute(
             "SELECT s.id, s.worker_tg_id, o.name, s.start_time FROM shifts s JOIN objects o ON s.object_id = o.id "
@@ -164,8 +189,6 @@ def get_shifts_for_reminder(hours_before):
         ).fetchall()
 
 def get_shifts_for_tomorrow():
-    """Смены на следующий день (с 00:00 до 23:59)"""
-    from datetime import datetime, timedelta
     tomorrow = datetime.now().date() + timedelta(days=1)
     start_dt = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0)
     end_dt = start_dt + timedelta(days=1)
