@@ -35,7 +35,7 @@ def init_db():
                 photo_end TEXT,
                 status TEXT DEFAULT 'scheduled',
                 FOREIGN KEY(worker_tg_id) REFERENCES users(tg_id),
-                FOREIGN KEY(object_id) REFERENCES objects(id)
+                FOREIGN KEY(object_id) REFERENCES objects(id) ON DELETE CASCADE
             );
             
             CREATE TABLE IF NOT EXISTS supply_orders (
@@ -47,6 +47,8 @@ def init_db():
                 processed_by INTEGER
             );
         """)
+        # Включаем поддержку внешних ключей
+        conn.execute("PRAGMA foreign_keys = ON")
         for tg_id in MANAGER_IDS:
             conn.execute(
                 "INSERT OR IGNORE INTO users (tg_id, role) VALUES (?, ?)",
@@ -80,6 +82,22 @@ def add_object(name, address, created_by):
 def get_objects():
     with get_connection() as conn:
         return conn.execute("SELECT id, name, address FROM objects ORDER BY name").fetchall()
+
+def get_object_by_id(obj_id):
+    with get_connection() as conn:
+        return conn.execute("SELECT id, name, address FROM objects WHERE id = ?", (obj_id,)).fetchone()
+
+def update_object(obj_id, name, address):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE objects SET name = ?, address = ? WHERE id = ?",
+            (name, address, obj_id)
+        )
+
+def delete_object(obj_id):
+    with get_connection() as conn:
+        # Благодаря ON DELETE CASCADE, смены удалятся автоматически
+        conn.execute("DELETE FROM objects WHERE id = ?", (obj_id,))
 
 def get_objects_with_last_shift():
     with get_connection() as conn:
