@@ -11,12 +11,10 @@ from utils import reminder_job
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
-
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Планировщик для напоминаний (проверяем каждый час)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(reminder_job, "interval", hours=1, args=[bot])
     scheduler.start()
